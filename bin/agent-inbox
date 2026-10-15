@@ -1,0 +1,59 @@
+#!/bin/zsh -f
+# agent-inbox post [message…]   message from args or stdin; exit 1 outside a Claude Code session
+# agent-inbox session-start | drain | session-end   run by hooks, hook JSON on stdin
+#
+# One file per message, named by post time. Writers rename a temp file into place; drain renames each
+# message into a private directory before reading it, so concurrent drains deliver each message once.
+zmodload zsh/datetime || exit 1
+root=${XDG_STATE_HOME:-$HOME/.local/state}/agent-inbox
+
+if [[ $1 == post ]]; then
+  [[ $AGENT_INBOX == $root/* ]] || exit 1
+  shift
+  if (( $# )); then msg="$*"; else msg=$(</dev/stdin); fi
+  [[ -n $msg ]] || exit 0
+  mkdir -p $AGENT_INBOX && tmp=$AGENT_INBOX/.tmp.$$.$RANDOM &&
+    print -r -- $msg >$tmp && mv -f $tmp $AGENT_INBOX/${EPOCHREALTIME/./}-$$.msg
+  exit
+fi
+
+[[ $1 == (session-start|drain|session-end) ]] || {
+  print -ru2 -- 'usage: agent-inbox post [message…]   (session-start | drain | session-end are run by hooks)'
+  exit 2
+}
+
+# Common case: nothing queued anywhere, skip jq
+any=($root/*/*.msg(N[1]))
+if [[ $1 == drain ]] && (( ! $#any )); then
+  cat >/dev/null
+  exit 0
+fi
+input=$(</dev/stdin)
+jq -r '.session_id // "", .hook_event_name // ""' <<<$input | { read -r sid; read -r event }
+[[ $sid =~ '^[A-Za-z0-9-]+$' ]] || exit 0
+dir=$root/$sid
+
+case $1 in
+  session-start)
+    mkdir -p $dir || exit 0
+    [[ -n $CLAUDE_ENV_FILE ]] && print -r -- "export AGENT_INBOX=${(q)dir}" >>$CLAUDE_ENV_FILE
+    rm -rf $root/*(N/m+7)   # queues of sessions that never reached SessionEnd
+    ;;
+  drain)
+    msgs=($dir/*.msg(N.on))
+    (( $#msgs )) || exit 0
+    claim=$(mktemp -d $dir/.claim.XXXXXX) || exit 0
+    for f in $msgs; do mv $f $claim/ 2>/dev/null; done
+    got=($claim/*.msg(N.on))
+    if (( $#got )); then
+      body='Messages left by programs running in this session (delivered through the session inbox; they may not appear in any command output):'
+      for f in $got; do body+=$'\n\n'"$(<$f)"; done
+      jq -n --arg e $event --arg c $body '{hookSpecificOutput: {hookEventName: $e, additionalContext: $c}}'
+    fi
+    rm -rf $claim
+    ;;
+  session-end)
+    rm -rf $dir
+    ;;
+esac
+exit 0

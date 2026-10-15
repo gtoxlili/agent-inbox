@@ -1,0 +1,9 @@
+{
+  "name": "agent-inbox",
+  "version": "0.1.0",
+  "description": "Per-session message queue: processes running in a session post messages that reach the agent before its next model call",
+  "author": { "name": "Gtio", "url": "https://github.com/gtoxlili" },
+  "repository": "https://github.com/gtoxlili/agent-inbox",
+  "license": "MIT",
+  "keywords": ["hooks", "context", "messaging"]
+}
