@@ -1,0 +1,5 @@
+{
+  "name": "agent-inbox",
+  "description": "Per-session message queue: processes running in a session post messages that reach the agent before its next model call",
+  "hooks": "./hooks/hooks-codex.json"
+}

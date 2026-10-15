@@ -10,7 +10,7 @@ check() {
   if eval "$2"; then (( pass_n++ )); print -r -- "ok    $1"
   else (( fail_n++ )); print -r -- "FAIL  $1"; print -r -- "      $2"; fi
 }
-hook() { print -r -- "{\"session_id\":\"$1\",\"hook_event_name\":\"$2\"}" }
+hook() { print -r -- "{\"session_id\":\"$1\",\"hook_event_name\":\"$2\",\"cwd\":\"$3\"}" }
 context() { jq -r '.hookSpecificOutput.additionalContext' }
 
 envfile=$XDG_STATE_HOME/env
@@ -47,6 +47,26 @@ check 'session-start removes queues untouched for 7 days' '[[ ! -e $root/stale &
 
 hook s1 SessionEnd | $bin session-end
 check 'session-end removes the queue' '[[ ! -e $root/s1 ]]'
+unset AGENT_INBOX
+
+# cwd mapping: Codex and opencode cannot rely on AGENT_INBOX reaching every child process
+work=$XDG_STATE_HOME/work; mkdir -p $work/sub
+hook thr_c1 SessionStart $work | $bin session-start >/dev/null
+check 'session ids with underscores are accepted (Codex thr_* ids)' '[[ -d $root/thr_c1 ]]'
+check 'post without AGENT_INBOX resolves the queue through the cwd mapping' \
+  '[[ $(cd $work && $bin post via-cwd && cd sub && $bin post via-subdir; hook thr_c1 PostToolUse | $bin drain | context) == *$'"'"'via-cwd\n\nvia-subdir'"'"' ]]'
+check 'session-end removes the cwd mapping' \
+  '{ hook thr_c1 SessionEnd $work | $bin session-end; [[ ! -e $root/thr_c1 && -z $(print -l $root/.by-cwd/*(N)) ]] }'
+
+hook c2 SessionStart $work | $bin session-start >/dev/null
+hook c3 SessionStart $work | $bin session-start >/dev/null   # second session, same cwd
+hook c2 SessionEnd $work | $bin session-end
+(cd $work && $bin post after-c2-ended)
+check 'an ended session does not take the mapping of a later session with the same cwd' \
+  '[[ $(hook c3 UserPromptSubmit | $bin drain | context) == *after-c2-ended* ]]'
+
+check 'post with no live mapping exits 1 even below a once-mapped cwd' \
+  '{ hook c3 SessionEnd $work | $bin session-end; (cd $work/sub && ! $bin post orphan) }'
 
 print
 print -r -- "$pass_n passed, $fail_n failed"

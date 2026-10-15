@@ -1,19 +1,39 @@
 #!/bin/zsh -f
-# agent-inbox post [message…]   message from args or stdin; exit 1 outside a Claude Code session
+# agent-inbox post [message…]   message from args or stdin; exit 1 outside a session
 # agent-inbox session-start | drain | session-end   run by hooks, hook JSON on stdin
 #
 # One file per message, named by post time. Writers rename a temp file into place; drain renames each
 # message into a private directory before reading it, so concurrent drains deliver each message once.
+#
+# post finds the session queue through $AGENT_INBOX. Where the agent cannot export the variable into
+# its shell calls (Codex has no CLAUDE_ENV_FILE), session-start records the queue in
+# $root/.by-cwd/<cksum of the session cwd> and post looks it up from its own working directory,
+# walking up to parent directories.
 zmodload zsh/datetime || exit 1
 root=${XDG_STATE_HOME:-$HOME/.local/state}/agent-inbox
 
+sum() { print -rn -- ${$(print -rn -- $1 | cksum)[1]} }   # POSIX cksum of a path; matches the opencode plugin
+
 if [[ $1 == post ]]; then
-  [[ $AGENT_INBOX == $root/* ]] || exit 1
+  if [[ -n $AGENT_INBOX ]]; then
+    [[ $AGENT_INBOX == $root/* ]] || exit 1
+    dir=$AGENT_INBOX
+  else
+    d=${PWD:A}
+    while [[ $d == /* ]]; do
+      f=$root/.by-cwd/$(sum $d)
+      [[ -f $f ]] && { IFS= read -r dir < $f; IFS= read -r mcwd < <(tail -1 $f)
+        [[ $dir == $root/* && -d $dir && $mcwd == $d ]] && break; unset dir }
+      [[ $d == / ]] && break
+      d=$d:h
+    done
+    [[ -n $dir && -d $dir ]] || exit 1
+  fi
   shift
   if (( $# )); then msg="$*"; else msg=$(</dev/stdin); fi
   [[ -n $msg ]] || exit 0
-  mkdir -p $AGENT_INBOX && tmp=$AGENT_INBOX/.tmp.$$.$RANDOM &&
-    print -r -- $msg >$tmp && mv -f $tmp $AGENT_INBOX/${EPOCHREALTIME/./}-$$.msg
+  mkdir -p $dir && tmp=$dir/.tmp.$$.$RANDOM &&
+    print -r -- $msg >$tmp && mv -f $tmp $dir/${EPOCHREALTIME/./}-$$.msg
   exit
 fi
 
@@ -29,15 +49,24 @@ if [[ $1 == drain ]] && (( ! $#any )); then
   exit 0
 fi
 input=$(</dev/stdin)
-jq -r '.session_id // "", .hook_event_name // ""' <<<$input | { read -r sid; read -r event }
-[[ $sid =~ '^[A-Za-z0-9-]+$' ]] || exit 0
+jq -r '.session_id // "", .hook_event_name // "", .cwd // ""' <<<$input | { read -r sid; read -r event; read -r cwd }
+[[ $sid =~ '^[A-Za-z0-9_-]+$' ]] || exit 0
 dir=$root/$sid
+[[ $cwd == /* ]] && cwd=${cwd:A} && map=$root/.by-cwd/$(sum $cwd)
 
 case $1 in
   session-start)
     mkdir -p $dir || exit 0
     [[ -n $CLAUDE_ENV_FILE ]] && print -r -- "export AGENT_INBOX=${(q)dir}" >>$CLAUDE_ENV_FILE
+    if [[ -n $map ]]; then
+      mkdir -p $root/.by-cwd && tmp=$map.$$.$RANDOM &&
+        print -r -- "$dir"$'\n'"$cwd" >$tmp && mv -f $tmp $map
+    fi
     rm -rf $root/*(N/m+7)   # queues of sessions that never reached SessionEnd
+    for f in $root/.by-cwd/*(N); do   # mappings whose queue is gone
+      IFS= read -r target < $f
+      [[ -d $target ]] || rm -f $f
+    done
     ;;
   drain)
     msgs=($dir/*.msg(N.on))
@@ -53,6 +82,7 @@ case $1 in
     rm -rf $claim
     ;;
   session-end)
+    [[ -n $map && -f $map ]] && { IFS= read -r target < $map; [[ $target == $dir ]] && rm -f $map }
     rm -rf $dir
     ;;
 esac
