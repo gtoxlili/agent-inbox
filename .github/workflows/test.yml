@@ -14,3 +14,4 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y zsh
       - run: zsh test/test.zsh
       - run: node test/opencode.test.mjs
+      - run: node test/opencode-v2.test.mjs

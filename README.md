@@ -28,7 +28,12 @@ To use it without the plugin system, put `bin/agent-inbox` on `PATH` and copy th
 
 **Codex**: copy the entries of [`hooks/hooks-codex.json`](hooks/hooks-codex.json) into `~/.codex/hooks.json`, replacing `"${CLAUDE_PLUGIN_ROOT}"/bin/agent-inbox` with the script's path, and put `bin/agent-inbox` on `PATH`. The repo also carries a `.codex-plugin/plugin.json`, so installing it as a Codex plugin loads the same hooks from `hooks/hooks-codex.json` (review and trust the hooks when Codex asks).
 
-**opencode**: copy `opencode/agent-inbox.js` into `~/.config/opencode/plugins/` (or a project's `.opencode/plugins/`) and put `bin/agent-inbox` on `PATH`. The opencode side is plain JavaScript with no dependencies; `post` still goes through the zsh CLI.
+**opencode**: put `bin/agent-inbox` on `PATH`, then —
+
+- v1: copy `opencode/agent-inbox.js` and `opencode/lib/` into `~/.config/opencode/plugins/` (or a project's `.opencode/plugins/`).
+- v2: copy `opencode/agent-inbox-v2.js` and `opencode/lib/` into `~/.config/opencode/plugins/agent-inbox/`, renaming the file to `index.js` (v2 discovers plugins per directory and resolves the `index` entrypoint; it does not run v1 plugins).
+
+Both sides are plain JavaScript with no dependencies; `post` still goes through the zsh CLI.
 
 ## Usage
 
@@ -61,7 +66,7 @@ Claude Code:
 
 Codex fires `PostToolUse` once per tool call instead of `PostToolBatch`, and has no `CLAUDE_ENV_FILE`, so `post` falls back to a working-directory lookup: `SessionStart` records the session's (canonicalized) cwd in `$XDG_STATE_HOME/agent-inbox/.by-cwd/`, and `post` without `AGENT_INBOX` walks its own cwd upwards until it finds a live mapping. Senders running in a directory unrelated to the session still need `AGENT_INBOX` pointed at the queue by hand.
 
-opencode has no hook JSON at all; `opencode/agent-inbox.js` implements the same queue in-process: `shell.env` exports `AGENT_INBOX` to the session's shell calls, `tool.execute.after` appends drained messages to the tool result, and `experimental.chat.messages.transform` delivers whatever is left as a synthetic user message before the next model call. opencode keeps sessions after the window closes, so queues of sessions that were never deleted are only removed by the 7-day cleanup; a message posted to a paused session is delivered when it resumes.
+opencode has no hook JSON at all; the plugin implements the same queue in-process. On v1 (`opencode/agent-inbox.js`), `shell.env` exports `AGENT_INBOX` to the session's shell calls, `tool.execute.after` appends drained messages to the tool result, and `experimental.chat.messages.transform` delivers whatever is left as a synthetic user message before the next model call. On v2 (`opencode/agent-inbox-v2.js`), `tool` `execute.after` appends to the tool result, the `session` `context` hook — which runs before every primary model request — appends whatever is left as a user message, and `shell` `create.before` sets `AGENT_INBOX` from the cwd mapping (the v2 shell hook carries no session id). opencode keeps sessions after the window closes, so queues of sessions that were never deleted are only removed by the 7-day cleanup; a message posted to a paused session is delivered when it resumes.
 
 Each message is one file. `post` writes a temporary file and renames it into the queue. `drain` moves every message into a private directory before reading it, so each message is delivered exactly once even when drains run concurrently.
 
@@ -86,7 +91,8 @@ Claude Code 2.1.224 and later bind a per-session [inbox socket](https://code.cla
 
 ```sh
 zsh test/test.zsh                          # contract tests with synthetic hook payloads
-node test/opencode.test.mjs                # opencode plugin tests
+node test/opencode.test.mjs                # opencode v1 plugin tests
+node test/opencode-v2.test.mjs             # opencode v2 plugin tests
 claude plugin validate .                   # manifest and hooks
 claude --plugin-dir . -p "…"               # run a session against the working tree
 ```
