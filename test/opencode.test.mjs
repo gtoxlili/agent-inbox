@@ -19,7 +19,7 @@ const post = (sid, text) =>
   })
 
 async function load(t, synthetic) {
-  const hooks = { session: {}, tool: {} }
+  const hooks = { session: {}, tool: {}, shell: {} }
   let events
   const stream = new ReadableStream({
     start(controller) {
@@ -36,6 +36,11 @@ async function load(t, synthetic) {
     tool: {
       hook: async (name, callback) => {
         hooks.tool[name] = callback
+      },
+    },
+    shell: {
+      hook: async (name, callback) => {
+        hooks.shell[name] = callback
       },
     },
     event: {

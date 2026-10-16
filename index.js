@@ -1,5 +1,6 @@
 // OpenCode v2. Synthetic admissions persist messages independently of tool output.
 import { spawn } from "node:child_process"
+import { dirname, delimiter } from "node:path"
 import { fileURLToPath } from "node:url"
 
 const bin = fileURLToPath(new URL("./bin/agent-inbox", import.meta.url))
@@ -22,6 +23,9 @@ function queue(command, ...args) {
 export default {
   id: "agent-inbox",
   async setup(ctx) {
+    await ctx.shell.hook("create.before", ({ env }) => {
+      env.PATH = [dirname(bin), env.PATH ?? process.env.PATH].filter(Boolean).join(delimiter)
+    })
     // Serial admission preserves post order within a session, including parallel tools.
     const pending = new Map()
     function flush(sessionID) {

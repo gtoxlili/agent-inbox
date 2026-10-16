@@ -1,0 +1,11 @@
+#!/bin/zsh -f
+# Codex does not expose plugin bin/ on PATH. Scope it to each shell invocation.
+# PreToolUse rewrites input before normal tool permissions and sandbox execution.
+jq -c --arg bin "${0:A:h:h}/bin" '
+  select(.tool_name == "Bash" and (.tool_input.command | type) == "string")
+  | {hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "allow",
+      updatedInput: (.tool_input | .command = ("export PATH=" + ($bin | @sh) + ":\"$PATH\"\n" + .command))
+    }}
+'

@@ -1,6 +1,6 @@
 {
   "name": "agent-inbox",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Per-session messages from child processes, delivered independently of command output",
   "hooks": "./hooks/hooks-codex.json"
 }

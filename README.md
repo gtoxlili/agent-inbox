@@ -14,7 +14,7 @@ Messages still arrive when the command redirects its output, captures it with `$
 
 ## Installation
 
-Requires **zsh and jq**, on macOS or Linux. Put this repository's `bin/` directory on `PATH` for sender programs. No npm dependencies or background service are required.
+Requires **zsh and jq**, on macOS or Linux. Each adapter makes `agent-inbox` available to shell commands and their child processes in enabled sessions. No global executable, shell profile change, npm dependency or background service is required.
 
 Tested with Claude Code **2.1.296**, Codex **0.162.1** and OpenCode **2.0.28**. The Codex adapter requires `CODEX_SESSION_ID` in shell children; OpenCode requires its v2 plugin API and `OPENCODE_SESSION_ID`.
 
@@ -30,6 +30,8 @@ For a local checkout:
 claude --plugin-dir /absolute/path/to/agent-inbox
 ```
 
+Claude Code automatically adds the enabled plugin's `bin/` to the Bash tool's `PATH`.
+
 For manual hook installation, merge [`hooks/hooks.json`](hooks/hooks.json) into `~/.claude/settings.json`, replacing `"${CLAUDE_PLUGIN_ROOT}"/bin/agent-inbox` with the quoted absolute path to the executable. Start a new session after enabling the hooks.
 
 ### Codex
@@ -41,11 +43,19 @@ codex plugin add agent-inbox@agent-inbox
 
 For a local checkout, use its absolute directory instead of `gtoxlili/agent-inbox`. Review and trust the plugin's hooks through `/hooks`, then start or resume a session. The plugin's [manifest](.codex-plugin/plugin.json) selects its Codex-specific hooks.
 
-For manual installation, merge [`hooks/hooks-codex.json`](hooks/hooks-codex.json) into `~/.codex/hooks.json`, replacing `"${PLUGIN_ROOT}"/bin/agent-inbox` with the quoted absolute executable path. Install either the plugin or manual hooks once; Codex runs all matching hook sources.
+Codex 0.162.1 does not add plugin executables to `PATH`. The plugin's [`PreToolUse` hook](hooks/codex-shell) prepends an exported `PATH` assignment to shell commands before normal permission checks and sandbox execution. This also exposes the sender to scripts those commands launch. It does not edit Codex configuration or shell startup files. Other hooks that replace the same shell command can conflict with this adapter.
+
+For manual installation, merge [`hooks/hooks-codex.json`](hooks/hooks-codex.json) into `~/.codex/hooks.json`, replacing `${PLUGIN_ROOT}` with the absolute checkout directory and keeping the surrounding quotes. Keep the checkout intact. Install either the plugin or manual hooks once; Codex runs all matching hook sources.
 
 ### OpenCode v2
 
-Clone the repository and add its directory to `plugins` in `opencode.json` or `opencode.jsonc`:
+Install at user scope:
+
+```sh
+opencode plugin add github:gtoxlili/agent-inbox
+```
+
+For a local checkout, add its directory to `plugins` in `opencode.json` or `opencode.jsonc`:
 
 ```json
 {
@@ -55,7 +65,7 @@ Clone the repository and add its directory to `plugins` in `opencode.json` or `o
 }
 ```
 
-Keep the checkout intact. OpenCode loads [`index.js`](index.js), which calls `bin/agent-inbox` for queue operations. Restart OpenCode after enabling the plugin. Existing sessions work when prompted again. OpenCode v1 is not supported.
+Keep a local checkout intact. OpenCode loads [`index.js`](index.js), which calls `bin/agent-inbox` for queue operations and uses `shell.create.before` to add its `bin/` to shell subprocesses' `PATH`. Restart OpenCode after enabling the plugin. Existing sessions work when prompted again. OpenCode v1 is not supported.
 
 ## Sender behaviour
 
@@ -70,8 +80,14 @@ Keep the checkout intact. OpenCode loads [`index.js`](index.js), which calls `bi
 Helpers that also run outside agent sessions can fall back to stderr:
 
 ```sh
-agent-inbox post "$msg" 2>/dev/null || echo "$msg" >&2
+if command -v agent-inbox >/dev/null 2>&1; then
+  agent-inbox post "$msg" 2>/dev/null || echo "$msg" >&2
+else
+  echo "$msg" >&2
+fi
 ```
+
+The command is exposed within agent shells, so ordinary terminals generally cannot find it. Posting still returns 1 when the command exists but its session queue has closed.
 
 An explicit `AGENT_INBOX` selects a queue. Otherwise, `post` uses `OPENCODE_SESSION_ID` or `CODEX_SESSION_ID`. Working directories do not identify sessions, so two sessions in the same checkout remain separate and changing directories does not affect routing.
 
@@ -106,7 +122,7 @@ claude plugin validate .claude-plugin/marketplace.json
 AGENT_INBOX_NATIVE_TEST=1 npm test
 ```
 
-The native tests install the Codex plugin into an isolated home, load the Claude Code and OpenCode plugins, execute a sender with stdout and stderr discarded, and inspect subsequent model requests. Codex runs with `workspace-write` and a state directory outside the workspace. Codex and OpenCode requests must retain their previous message prefix exactly; Claude Code must retain the delivered text across its transport's cache-marker changes.
+The native tests install the Codex plugin into an isolated home, load the Claude Code and OpenCode plugins, and invoke the bare `agent-inbox` command from a child shell with stdout and stderr discarded. They inspect subsequent model requests without adding the sender to the test environment's `PATH`. Codex runs with `workspace-write`, and a separate attempted write outside the workspace must remain denied after the PATH hook runs. Codex and OpenCode requests must retain their previous message prefix exactly; Claude Code must retain the delivered text across its transport's cache-marker changes.
 
 ## License
 

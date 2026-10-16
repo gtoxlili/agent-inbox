@@ -2,7 +2,7 @@
 // No provider credentials or remote model calls. AGENT_INBOX_NATIVE_TEST=1 npm test
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { createServer } from "node:http"
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
@@ -12,9 +12,11 @@ import { fileURLToPath } from "node:url"
 const repo = fileURLToPath(new URL("..", import.meta.url))
 const enabled = process.env.AGENT_INBOX_NATIVE_TEST === "1"
 const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`
+const sender = (dir, marker) =>
+  `sh -c ${quote(`command -v agent-inbox > ${quote(join(dir, "sender-path"))} && agent-inbox post ${quote(marker)} >/dev/null 2>&1`)}`
 
 async function fixture(t, respond) {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "agent-inbox-native-")))
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "agent-inbox-native space'-")))
   t.after(() => rmSync(dir, { recursive: true, force: true }))
   const requests = []
   const server = createServer(async (req, res) => {
@@ -78,6 +80,7 @@ test(
   { skip: !enabled, timeout: 60_000 },
   async (t) => {
     const marker = "codex-native-inbox-probe"
+    let forbidden
     const f = await fixture(t, (_body, res, requests) => {
       const n = requests.length
       const event = (value) => res.write(`data: ${JSON.stringify(value)}\n\n`)
@@ -89,7 +92,10 @@ test(
               call_id: `call_${n}`,
               name: "exec_command",
               arguments: JSON.stringify({
-                cmd: n === 1 ? `${quote(join(repo, "bin/agent-inbox"))} post ${quote(marker)} >/dev/null 2>&1` : "true",
+                cmd:
+                  n === 1
+                    ? sender(f.dir, marker)
+                    : `printf blocked > ${quote(forbidden)}`,
               }),
             }
           : { type: "message", role: "assistant", id: "msg_done", content: [{ type: "output_text", text: "done" }] }
@@ -101,6 +107,7 @@ test(
     })
     const testHome = join(f.dir, "codex")
     const state = mkdtempSync(join(homedir(), ".agent-inbox-native-"))
+    forbidden = join(state, "sandbox-must-deny")
     t.after(() => rmSync(state, { recursive: true, force: true }))
     mkdirSync(testHome)
     writeFileSync(
@@ -127,6 +134,10 @@ test(
     )
     try {
       checkHistory(f.requests, "input", marker)
+      assert.ok(readFileSync(join(f.dir, "sender-path"), "utf8").startsWith(join(testHome, "plugins/cache/")))
+      assert.equal(existsSync(forbidden), false, "the PATH hook must preserve the workspace-write sandbox")
+      const results = f.requests[2].input.filter((item) => item.type === "function_call_output")
+      assert.match(JSON.stringify(results.at(-1)), /Operation not permitted|Permission denied|reject|sandbox/i)
     } catch (error) {
       t.diagnostic(output.slice(0, 4000))
       throw error
@@ -165,7 +176,7 @@ test(
             type: "input_json_delta",
             partial_json: JSON.stringify({
               command:
-                n === 1 ? `${quote(join(repo, "bin/agent-inbox"))} post ${quote(marker)} >/dev/null 2>&1` : "true",
+                n === 1 ? sender(f.dir, marker) : "true",
             }),
           },
         })
@@ -217,6 +228,7 @@ test(
     assert.equal(mail(f.requests[1]).length, 1)
     assert.ok(mail(f.requests[1])[0].includes(marker))
     assert.deepEqual(mail(f.requests[2]), mail(f.requests[1]))
+    assert.equal(readFileSync(join(f.dir, "sender-path"), "utf8").trim(), join(repo, "bin/agent-inbox"))
   },
 )
 
@@ -243,7 +255,7 @@ test(
                     arguments: JSON.stringify({
                       command:
                         n === 1
-                          ? `${quote(join(repo, "bin/agent-inbox"))} post ${quote(marker)} >/dev/null 2>&1`
+                          ? sender(f.dir, marker)
                           : "true",
                     }),
                   },
@@ -287,6 +299,7 @@ test(
     )
     try {
       checkHistory(primary, "messages", marker)
+      assert.equal(readFileSync(join(f.dir, "sender-path"), "utf8").trim(), join(repo, "bin/agent-inbox"))
     } catch (error) {
       t.diagnostic(
         output
