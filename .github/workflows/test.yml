@@ -10,8 +10,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y zsh
-      - run: zsh test/test.zsh
-      - run: node test/opencode.test.mjs
-      - run: node test/opencode-v2.test.mjs
+      - run: npm test

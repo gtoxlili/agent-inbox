@@ -1,6 +1,6 @@
 {
   "name": "agent-inbox",
-  "description": "agent-inbox plugin for Claude Code",
+  "description": "agent-inbox plugin for Claude Code and Codex",
   "owner": { "name": "Gtio", "url": "https://github.com/gtoxlili" },
   "plugins": [
     { "name": "agent-inbox", "source": "./" }

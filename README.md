@@ -3,99 +3,110 @@
 [![test](https://github.com/gtoxlili/agent-inbox/actions/workflows/test.yml/badge.svg)](https://github.com/gtoxlili/agent-inbox/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A plugin for [Claude Code](https://code.claude.com), [Codex](https://github.com/openai/codex) and [opencode](https://opencode.ai) that gives each session a message queue. Any process running inside the session can post to it, and the queued messages are added to the agent's context before its next model call.
-
-Delivery does not go through the process's stdout or stderr. A message arrives even when the agent ran the command with `2>/dev/null`, captured it with `$(…)`, or invoked it through a tool that discards child output. Typical senders are credential helpers, command wrappers and background jobs that need the agent to know why something failed.
-
-## Installation
-
-**Claude Code** 2.1.275 or later:
-
-```
-/plugin install agent-inbox --marketplace gtoxlili/agent-inbox
-```
-
-Earlier versions:
-
-```
-/plugin marketplace add gtoxlili/agent-inbox
-/plugin install agent-inbox@agent-inbox
-```
-
-The inbox exists only in sessions started after the plugin is enabled. Requirements are zsh and jq on macOS or Linux. The plugin is tested with Claude Code 2.1.296.
-
-To use it without the plugin system, put `bin/agent-inbox` on `PATH` and copy the entries of [`hooks/hooks.json`](hooks/hooks.json) into `~/.claude/settings.json`, replacing `"${CLAUDE_PLUGIN_ROOT}"/bin/agent-inbox` with the script's path.
-
-**Codex**: copy the entries of [`hooks/hooks-codex.json`](hooks/hooks-codex.json) into `~/.codex/hooks.json`, replacing `"${CLAUDE_PLUGIN_ROOT}"/bin/agent-inbox` with the script's path, and put `bin/agent-inbox` on `PATH`. The repo also carries a `.codex-plugin/plugin.json`, so installing it as a Codex plugin loads the same hooks from `hooks/hooks-codex.json` (review and trust the hooks when Codex asks).
-
-**opencode**: put `bin/agent-inbox` on `PATH`, then —
-
-- v1: copy `opencode/agent-inbox.js` and `opencode/lib/` into `~/.config/opencode/plugins/` (or a project's `.opencode/plugins/`).
-- v2: copy `opencode/agent-inbox-v2.js` and `opencode/lib/` into `~/.config/opencode/plugins/agent-inbox/`, renaming the file to `index.js` (v2 discovers plugins per directory and resolves the `index` entrypoint; it does not run v1 plugins).
-
-Both sides are plain JavaScript with no dependencies; `post` still goes through the zsh CLI.
-
-## Usage
+A per-session inbox for Claude Code, Codex and OpenCode v2. Programs running in an agent's shell can post messages that reach the agent at the next tool or prompt boundary, independently of stdout and stderr.
 
 ```sh
-agent-inbox post "deploy.sh: staging is locked until 14:00; retrying earlier fails the same way"
+agent-inbox post "deploy.sh: staging is locked until 14:00"
 echo "multi-line message" | agent-inbox post
 ```
 
+Messages still arrive when the command redirects its output, captures it with `$(…)`, or runs through code mode that discards tool output. An idle session receives mail at its next prompt; posting does not start a turn.
+
+## Installation
+
+Requires **zsh and jq**, on macOS or Linux. Put this repository's `bin/` directory on `PATH` for sender programs. No npm dependencies or background service are required.
+
+Tested with Claude Code **2.1.296**, Codex **0.162.1** and OpenCode **2.0.28**. The Codex adapter requires `CODEX_SESSION_ID` in shell children; OpenCode requires its v2 plugin API and `OPENCODE_SESSION_ID`.
+
+### Claude Code
+
+```text
+/plugin install agent-inbox --marketplace gtoxlili/agent-inbox
+```
+
+For a local checkout:
+
+```sh
+claude --plugin-dir /absolute/path/to/agent-inbox
+```
+
+For manual hook installation, merge [`hooks/hooks.json`](hooks/hooks.json) into `~/.claude/settings.json`, replacing `"${CLAUDE_PLUGIN_ROOT}"/bin/agent-inbox` with the quoted absolute path to the executable. Start a new session after enabling the hooks.
+
+### Codex
+
+```sh
+codex plugin marketplace add gtoxlili/agent-inbox
+codex plugin add agent-inbox@agent-inbox
+```
+
+For a local checkout, use its absolute directory instead of `gtoxlili/agent-inbox`. Review and trust the plugin's hooks through `/hooks`, then start or resume a session. The plugin's [manifest](.codex-plugin/plugin.json) selects its Codex-specific hooks.
+
+For manual installation, merge [`hooks/hooks-codex.json`](hooks/hooks-codex.json) into `~/.codex/hooks.json`, replacing `"${PLUGIN_ROOT}"/bin/agent-inbox` with the quoted absolute executable path. Install either the plugin or manual hooks once; Codex runs all matching hook sources.
+
+### OpenCode v2
+
+Clone the repository and add its directory to `plugins` in `opencode.json` or `opencode.jsonc`:
+
+```json
+{
+  "plugins": [
+    { "package": "/absolute/path/to/agent-inbox" }
+  ]
+}
+```
+
+Keep the checkout intact. OpenCode loads [`index.js`](index.js), which calls `bin/agent-inbox` for queue operations. Restart OpenCode after enabling the plugin. Existing sessions work when prompted again. OpenCode v1 is not supported.
+
+## Sender behaviour
+
+`post` reads its arguments joined by spaces, or stdin when no arguments are supplied. Empty messages inside an enabled session are ignored.
+
 | Exit status | Meaning |
 |---|---|
-| 0 | message queued, or the message was empty |
-| 1 | not inside a session with the plugin enabled |
+| 0 | Message queued, or empty message ignored |
+| 1 | No enabled session queue, or a write failed |
+| 2 | Invalid command or adapter arguments |
 
-A sender that may also run outside an agent session, where the command is absent or exits 1, can fall back to stderr:
+Helpers that also run outside agent sessions can fall back to stderr:
 
 ```sh
 agent-inbox post "$msg" 2>/dev/null || echo "$msg" >&2
 ```
 
-## How it works
+An explicit `AGENT_INBOX` selects a queue. Otherwise, `post` uses `OPENCODE_SESSION_ID` or `CODEX_SESSION_ID`. Working directories do not identify sessions, so two sessions in the same checkout remain separate and changing directories does not affect routing.
 
-Claude Code:
+## Delivery and lifecycle
 
-| Hook | Action |
-|---|---|
-| `SessionStart` | creates `$XDG_STATE_HOME/agent-inbox/<session_id>/` and exports its path as `AGENT_INBOX` to the session's Bash calls through `CLAUDE_ENV_FILE` |
-| `PostToolBatch` | claims the queued messages and returns them as `additionalContext` |
-| `UserPromptSubmit` | same, for messages posted after the last tool round |
-| `SessionEnd` | deletes the queue; queues untouched for 7 days are removed at the next `SessionStart` |
+All adapters use the same file queue in [`bin/agent-inbox`](bin/agent-inbox). Each message is published by atomically renaming a private temporary file. Queue directories and message files are private to the current user.
 
-Codex fires `PostToolUse` once per tool call instead of `PostToolBatch`, and has no `CLAUDE_ENV_FILE`, so `post` falls back to a working-directory lookup: `SessionStart` records the session's (canonicalized) cwd in `$XDG_STATE_HOME/agent-inbox/.by-cwd/`, and `post` without `AGENT_INBOX` walks its own cwd upwards until it finds a live mapping. Senders running in a directory unrelated to the session still need `AGENT_INBOX` pointed at the queue by hand.
+| Client | Session identity | Delivery boundary | Cleanup |
+|---|---|---|---|
+| Claude Code | `SessionStart` exports `AGENT_INBOX` through `CLAUDE_ENV_FILE` | `PostToolBatch` and `UserPromptSubmit` return `additionalContext` | `SessionEnd` |
+| Codex | Native `CODEX_SESSION_ID`, matching hook `session_id` | `PostToolUse` and `UserPromptSubmit` return `additionalContext` | `SessionEnd` |
+| OpenCode v2 | Native `OPENCODE_SESSION_ID` | `tool.execute.after` and prompt admission transfer mail into `session.synthetic` | Session deletion |
 
-opencode has no hook JSON at all; the plugin implements the same queue in-process. On v1 (`opencode/agent-inbox.js`), `shell.env` exports `AGENT_INBOX` to the session's shell calls, `tool.execute.after` appends drained messages to the tool result, and `experimental.chat.messages.transform` delivers whatever is left as a synthetic user message before the next model call. On v2 (`opencode/agent-inbox-v2.js`), `tool` `execute.after` appends to the tool result, the `session` `context` hook — which runs before every primary model request — appends whatever is left as a user message, and `shell` `create.before` sets `AGENT_INBOX` from the cwd mapping (the v2 shell hook carries no session id). opencode keeps sessions after the window closes, so queues of sessions that were never deleted are only removed by the 7-day cleanup; a message posted to a paused session is delivered when it resumes.
+Claude Code and Codex store queues in `${TMPDIR:-/tmp}/agent-inbox-<uid>/<session_id>/`. This directory is writable under Codex's default `workspace-write` sandbox. OpenCode stores queues in `${XDG_STATE_HOME:-$HOME/.local/state}/agent-inbox/<session_id>/` so paused sessions can retain mail across restarts. Read-only or stricter custom sandboxes must permit writes to the relevant queue directory.
 
-Each message is one file. `post` writes a temporary file and renames it into the queue. `drain` moves every message into a private directory before reading it, so each message is delivered exactly once even when drains run concurrently.
+Claude Code and Codex claim files before reading them, so concurrent drains do not deliver the same file twice. Their hook protocols provide no delivery receipt; a crash during a drain can lose the claimed messages. OpenCode keeps each file until its native inbox confirms durable admission, using a stable message ID so retries do not duplicate it. Native admission preserves the message in session history and uses `resume: false` to leave idle sessions asleep. The plugin does not modify assembled model requests or tool results.
 
-Behaviour observed on Claude Code 2.1.296:
+Claude Code subagents and Codex subagents share their root session's queue. The first agent to reach a delivery boundary receives the messages. OpenCode child sessions have their own IDs and queues.
 
-- `PostToolBatch` fires after every tool round, including rounds with a single call and rounds whose calls failed.
-- A subagent shares its parent's `session_id` and therefore its queue. Messages go to whichever agent of the session finishes a tool round first, which in practice is the agent whose command posted them.
-- An idle session receives queued messages with the next prompt.
+Queues untouched for seven days are collected when a queue is initialized. Current queues are refreshed before collection. A writer cannot recreate a queue after it is closed. OpenCode sessions persist across restarts, and their file queues can receive background mail while paused.
 
-## Compared with the built-in session socket
-
-Claude Code 2.1.224 and later bind a per-session [inbox socket](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket), exported as `CLAUDE_CODE_MESSAGING_SOCKET`, that also accepts messages from the session's own child processes.
-
-| | Built-in socket | agent-inbox |
-|---|---|---|
-| Idle session | starts a new turn | message waits for the next prompt |
-| Message posted from a subagent's command | delivered to the main conversation | stays with the subagent that ran the command |
-| `crossSessionInbound: hold \| refuse` | holds or drops the message | not consulted |
-| Transport | JSON lines over a Unix socket | one file per message |
+The native APIs are documented in [Codex hooks](https://developers.openai.com/codex/hooks) and [OpenCode v2 plugins](https://dev.opencode.ai/v2/docs/build/plugins/).
 
 ## Development
 
 ```sh
-zsh test/test.zsh                          # contract tests with synthetic hook payloads
-node test/opencode.test.mjs                # opencode v1 plugin tests
-node test/opencode-v2.test.mjs             # opencode v2 plugin tests
-claude plugin validate .                   # manifest and hooks
-claude --plugin-dir . -p "…"               # run a session against the working tree
+npm test
+claude plugin validate .claude-plugin/plugin.json
+claude plugin validate .claude-plugin/marketplace.json
+
+# Real installed CLIs with a local scripted model; no paid API calls.
+AGENT_INBOX_NATIVE_TEST=1 npm test
 ```
+
+The native tests install the Codex plugin into an isolated home, load the Claude Code and OpenCode plugins, execute a sender with stdout and stderr discarded, and inspect subsequent model requests. Codex runs with `workspace-write` and a state directory outside the workspace. Codex and OpenCode requests must retain their previous message prefix exactly; Claude Code must retain the delivered text across its transport's cache-marker changes.
 
 ## License
 

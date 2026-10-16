@@ -1,89 +1,93 @@
 #!/bin/zsh -f
-# agent-inbox post [message…]   message from args or stdin; exit 1 outside a session
-# agent-inbox session-start | drain | session-end   run by hooks, hook JSON on stdin
-#
-# One file per message, named by post time. Writers rename a temp file into place; drain renames each
-# message into a private directory before reading it, so concurrent drains deliver each message once.
-#
-# post finds the session queue through $AGENT_INBOX. Where the agent cannot export the variable into
-# its shell calls (Codex has no CLAUDE_ENV_FILE), session-start records the queue in
-# $root/.by-cwd/<cksum of the session cwd> and post looks it up from its own working directory,
-# walking up to parent directories.
+# post [message…]: args or stdin. Hooks use session-start / drain / session-end.
+# queue-* commands are the OpenCode adapter's file-queue interface.
 zmodload zsh/datetime || exit 1
-root=${XDG_STATE_HOME:-$HOME/.local/state}/agent-inbox
-
-sum() { print -rn -- ${$(print -rn -- $1 | cksum)[1]} }   # POSIX cksum of a path; matches the opencode plugin
+umask 077
+state_root=${XDG_STATE_HOME:-$HOME/.local/state}/agent-inbox
+state_root=${state_root:A}
+session_root=${TMPDIR:-/tmp}/agent-inbox-$UID
+session_root=${session_root:A}
+root=$session_root
+valid() { [[ $1 =~ '^[A-Za-z0-9_-]+$' ]] }
 
 if [[ $1 == post ]]; then
   if [[ -n $AGENT_INBOX ]]; then
-    [[ $AGENT_INBOX == $root/* ]] || exit 1
-    dir=$AGENT_INBOX
+    dir=${AGENT_INBOX:A}
+    [[ ${dir:h} == $session_root || ${dir:h} == $state_root ]] && valid ${dir:t} || exit 1
   else
-    d=${PWD:A}
-    while [[ $d == /* ]]; do
-      f=$root/.by-cwd/$(sum $d)
-      [[ -f $f ]] && { IFS= read -r dir < $f; IFS= read -r mcwd < <(tail -1 $f)
-        [[ $dir == $root/* && -d $dir && $mcwd == $d ]] && break; unset dir }
-      [[ $d == / ]] && break
-      d=$d:h
-    done
-    [[ -n $dir && -d $dir ]] || exit 1
+    # Both runtimes supply these to shell children, including background jobs.
+    if [[ -n $OPENCODE_SESSION_ID ]]; then sid=$OPENCODE_SESSION_ID; root=$state_root
+    else sid=$CODEX_SESSION_ID; fi
+    valid $sid || exit 1
+    dir=$root/$sid
   fi
+  # A late background writer must not recreate an ended session's inbox.
+  [[ -d $dir ]] || exit 1
   shift
   if (( $# )); then msg="$*"; else msg=$(</dev/stdin); fi
   [[ -n $msg ]] || exit 0
-  mkdir -p $dir && tmp=$dir/.tmp.$$.$RANDOM &&
-    print -r -- $msg >$tmp && mv -f $tmp $dir/${EPOCHREALTIME/./}-$$.msg
+  tmp=$(mktemp $dir/.tmp.XXXXXXXXXX) || exit 1
+  trap 'rm -f -- $tmp' EXIT
+  print -r -- $msg >$tmp && mv -- $tmp $dir/${EPOCHREALTIME/./}-$$-${tmp:t}.msg
   exit
 fi
 
-[[ $1 == (session-start|drain|session-end) ]] || {
-  print -ru2 -- 'usage: agent-inbox post [message…]   (session-start | drain | session-end are run by hooks)'
-  exit 2
-}
-
-# Common case: nothing queued anywhere, skip jq
-any=($root/*/*.msg(N[1]))
-if [[ $1 == drain ]] && (( ! $#any )); then
-  cat >/dev/null
-  exit 0
-fi
-input=$(</dev/stdin)
-jq -r '.session_id // "", .hook_event_name // "", .cwd // ""' <<<$input | { read -r sid; read -r event; read -r cwd }
-[[ $sid =~ '^[A-Za-z0-9_-]+$' ]] || exit 0
-dir=$root/$sid
-[[ $cwd == /* ]] && cwd=${cwd:A} && map=$root/.by-cwd/$(sum $cwd)
-
 case $1 in
-  session-start)
-    mkdir -p $dir || exit 0
-    [[ -n $CLAUDE_ENV_FILE ]] && print -r -- "export AGENT_INBOX=${(q)dir}" >>$CLAUDE_ENV_FILE
-    if [[ -n $map ]]; then
-      mkdir -p $root/.by-cwd && tmp=$map.$$.$RANDOM &&
-        print -r -- "$dir"$'\n'"$cwd" >$tmp && mv -f $tmp $map
-    fi
-    rm -rf $root/*(N/m+7)   # queues of sessions that never reached SessionEnd
-    for f in $root/.by-cwd/*(N); do   # mappings whose queue is gone
-      IFS= read -r target < $f
-      [[ -d $target ]] || rm -f $f
-    done
+  session-start|drain|session-end)
+    input=$(</dev/stdin)
+    fields=$(jq -er '[.session_id, .hook_event_name] | select(all(.[]; type == "string")) | .[]' <<<$input) || exit 0
+    sid=${${(f)fields}[1]}
+    event=${${(f)fields}[2]}
+    valid $sid || exit 0
     ;;
-  drain)
-    msgs=($dir/*.msg(N.on))
-    (( $#msgs )) || exit 0
-    claim=$(mktemp -d $dir/.claim.XXXXXX) || exit 0
-    for f in $msgs; do mv $f $claim/ 2>/dev/null; done
-    got=($claim/*.msg(N.on))
-    if (( $#got )); then
-      body='Messages left by programs running in this session (delivered through the session inbox; they may not appear in any command output):'
-      for f in $got; do body+=$'\n\n'"$(<$f)"; done
-      jq -n --arg e $event --arg c $body '{hookSpecificOutput: {hookEventName: $e, additionalContext: $c}}'
-    fi
-    rm -rf $claim
+  queue-init|queue-pending|queue-ack|queue-remove)
+    sid=$2
+    valid $sid || exit 2
+    root=$state_root
     ;;
-  session-end)
-    [[ -n $map && -f $map ]] && { IFS= read -r target < $map; [[ $target == $dir ]] && rm -f $map }
-    rm -rf $dir
+  *)
+    print -ru2 -- 'usage: agent-inbox post [message…]   (session-start | drain | session-end are run by hooks)'
+    exit 2
     ;;
 esac
-exit 0
+dir=$root/$sid
+header='Messages left by programs running in this session (delivered through the session inbox; they may not appear in any command output):'
+
+case $1 in
+  session-start|queue-init)
+    mkdir -p -- $dir && touch -- $dir || exit 1
+    if [[ $1 == session-start && -n $CLAUDE_ENV_FILE ]]; then
+      print -r -- "export AGENT_INBOX=${(q)dir}" >>$CLAUDE_ENV_FILE || exit 1
+    fi
+    # Refresh the current queue before collecting sessions missing their end event.
+    rm -rf -- $root/*(N/m+7)
+    ;;
+  drain)
+    [[ -d $dir ]] || exit 0
+    touch -- $dir
+    msgs=($dir/*.msg(N.on))
+    (( $#msgs )) || exit 0
+    claim=$(mktemp -d $dir/.claim.XXXXXXXXXX) || exit 1
+    for f in $msgs; do mv -- $f $claim/ 2>/dev/null; done
+    got=($claim/*.msg(N.on))
+    if (( $#got )); then
+      body=$header
+      for f in $got; do body+=$'\n\n'"$(<$f)"; done
+      print -rn -- $body | jq -Rs --arg e $event '{hookSpecificOutput: {hookEventName: $e, additionalContext: .}}'
+    fi
+    rm -rf -- $claim
+    ;;
+  queue-pending)
+    # OpenCode acknowledges each file only after durable, idempotent admission.
+    for f in $dir/*.msg(N.on); do
+      print -rn -- "$header"$'\n\n'"$(<$f)" | jq -cRs --arg id ${f:t:r} '{id: $id, text: .}' || exit 1
+    done
+    ;;
+  queue-ack)
+    [[ $3 =~ '^[A-Za-z0-9_.-]+$' ]] || exit 2
+    rm -f -- $dir/$3.msg
+    ;;
+  session-end|queue-remove)
+    rm -rf -- $dir
+    ;;
+esac
