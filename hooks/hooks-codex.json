@@ -1,12 +1,6 @@
 {
   "description": "Per-session message queue: processes running in a session post messages that reach the agent before its next model call",
   "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "^Bash$",
-        "hooks": [{ "type": "command", "command": "\"${PLUGIN_ROOT}\"/hooks/codex-shell", "timeout": 5 }]
-      }
-    ],
     "SessionStart": [
       {
         "hooks": [

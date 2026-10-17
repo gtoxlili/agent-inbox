@@ -31,8 +31,13 @@ async function fixture(t, respond) {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
   t.after(() => new Promise((resolve) => server.close(resolve)))
   const url = `http://127.0.0.1:${server.address().port}`
+  const home = join(dir, "home")
+  mkdirSync(home)
   const env = {
-    PATH: process.env.PATH,
+    // Neither the host's installed sender nor its shell startup files may supply it.
+    PATH: process.env.PATH.split(":").filter((dir) => !existsSync(join(dir, "agent-inbox"))).join(":"),
+    HOME: home,
+    ZDOTDIR: home,
     SHELL: "/bin/zsh",
     TMPDIR: process.env.TMPDIR,
     XDG_STATE_HOME: join(dir, "state"),
@@ -110,11 +115,16 @@ test(
     forbidden = join(state, "sandbox-must-deny")
     t.after(() => rmSync(state, { recursive: true, force: true }))
     mkdirSync(testHome)
+    const cli = join(testHome, "tools/agent-inbox")
+    const cliBin = join(cli, "node_modules/.bin")
     writeFileSync(
       join(testHome, "config.toml"),
-      `model = "inbox-test"\nmodel_provider = "local-test"\n[model_providers.local-test]\nname = "Local test"\nbase_url = "${f.url}"\nwire_api = "responses"\nrequires_openai_auth = false\n[features]\ncode_mode = false\n`,
+      `model = "inbox-test"\nmodel_provider = "local-test"\n[model_providers.local-test]\nname = "Local test"\nbase_url = "${f.url}"\nwire_api = "responses"\nrequires_openai_auth = false\n[features]\ncode_mode = false\n[shell_environment_policy.set]\nPATH = ${JSON.stringify(`${cliBin}:${f.env.PATH}`)}\n`,
     )
     const options = { cwd: f.dir, env: { ...f.env, XDG_STATE_HOME: state, CODEX_HOME: testHome } }
+    const archive = JSON.parse(await run("npm", ["pack", "--json", "--pack-destination", f.dir], { cwd: repo, env: f.env }))[0].filename
+    await run("npm", ["install", "--prefix", cli, "--no-save", "--package-lock=false", "--ignore-scripts", "--no-audit", "--no-fund", join(f.dir, archive)], { cwd: f.dir, env: f.env })
+    await run("/bin/zsh", ["-fc", "! command -v agent-inbox"], options)
     await run("codex", ["plugin", "marketplace", "add", repo, "--json"], options)
     await run("codex", ["plugin", "add", "agent-inbox@agent-inbox", "--json"], options)
     const output = await run(
@@ -129,13 +139,17 @@ test(
       ],
       {
         cwd: f.dir,
-        env: { ...f.env, XDG_STATE_HOME: state, CODEX_HOME: testHome },
+        env: options.env,
       },
     )
     try {
       checkHistory(f.requests, "input", marker)
-      assert.ok(readFileSync(join(f.dir, "sender-path"), "utf8").startsWith(join(testHome, "plugins/cache/")))
-      assert.equal(existsSync(forbidden), false, "the PATH hook must preserve the workspace-write sandbox")
+      assert.doesNotMatch(output, /export PATH=/, "the inbox must not rewrite commands shown in the client")
+      assert.equal(readFileSync(join(f.dir, "sender-path"), "utf8").trim(), join(cliBin, "agent-inbox"))
+      for (const request of f.requests) {
+        assert.doesNotMatch(JSON.stringify(request.input), /export PATH=/, "command prefixes must not enter model history")
+      }
+      assert.equal(existsSync(forbidden), false, "the inbox must preserve the workspace-write sandbox")
       const results = f.requests[2].input.filter((item) => item.type === "function_call_output")
       assert.match(JSON.stringify(results.at(-1)), /Operation not permitted|Permission denied|reject|sandbox/i)
     } catch (error) {

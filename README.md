@@ -14,7 +14,7 @@ Messages still arrive when the command redirects its output, captures it with `$
 
 ## Installation
 
-Requires **zsh and jq**, on macOS or Linux. Each adapter makes `agent-inbox` available to shell commands and their child processes in enabled sessions. No global executable, shell profile change, npm dependency or background service is required.
+Requires **zsh and jq**, on macOS or Linux. Claude Code and OpenCode expose the bundled sender within agent shells. Codex uses npm to install a private sender and a Codex-only shell environment setting, as described below. No global executable, runtime npm dependencies or background service are required.
 
 Tested with Claude Code **2.1.296**, Codex **0.162.1** and OpenCode **2.0.28**. The Codex adapter requires `CODEX_SESSION_ID` in shell children; OpenCode requires its v2 plugin API and `OPENCODE_SESSION_ID`.
 
@@ -36,14 +36,33 @@ For manual hook installation, merge [`hooks/hooks.json`](hooks/hooks.json) into 
 
 ### Codex
 
+Codex setup requires the private sender, the hook plugin, and a one-time PATH setting in `${CODEX_HOME:-$HOME/.codex}/config.toml`. Installing the plugin does not install the private sender or write this setting. The hooks do not edit Codex configuration; complete the steps below before starting or resuming a session.
+
+Install the sender into a private directory under `CODEX_HOME`, then install the hook plugin:
+
 ```sh
+agent_inbox_prefix="${CODEX_HOME:-$HOME/.codex}/tools/agent-inbox"
+npm install --prefix "$agent_inbox_prefix" --no-save --package-lock=false github:gtoxlili/agent-inbox
 codex plugin marketplace add gtoxlili/agent-inbox
 codex plugin add agent-inbox@agent-inbox
 ```
 
-For a local checkout, use its absolute directory instead of `gtoxlili/agent-inbox`. Review and trust the plugin's hooks through `/hooks`, then start or resume a session. The plugin's [manifest](.codex-plugin/plugin.json) selects its Codex-specific hooks.
+Generate the Codex-only PATH setting:
 
-Codex 0.162.1 does not add plugin executables to `PATH`. The plugin's [`PreToolUse` hook](hooks/codex-shell) prepends an exported `PATH` assignment to shell commands before normal permission checks and sandbox execution. This also exposes the sender to scripts those commands launch. It does not edit Codex configuration or shell startup files. Other hooks that replace the same shell command can conflict with this adapter.
+```sh
+jq -nr --arg bin "$agent_inbox_prefix/node_modules/.bin" --arg current "$PATH" \
+  '"[shell_environment_policy.set]\nPATH = \(($bin + ":" + $current) | tojson)"'
+```
+
+Merge the printed table into `${CODEX_HOME:-$HOME/.codex}/config.toml`, preserving any existing keys in that table. The PATH value is literal: Codex does not expand `~` or `$PATH` inside it. The command above records the private directory plus your current PATH as a complete absolute value. Regenerate it if you change that environment.
+
+Codex passes this setting as an environment variable to its shell children, keeping command text unchanged. Do not add the private directory to your shell profile or global PATH. Ordinary terminals cannot find the sender.
+
+Review and trust the plugin's four lifecycle hooks through `/hooks`, then start or resume a session. Codex 0.162.1 does not expose plugin executables automatically. The private npm directory stays stable across updates; the plugin only initializes, drains and closes session queues. It does not register a `PreToolUse` hook or modify shell commands.
+
+For a local checkout, use its absolute directory instead of `gtoxlili/agent-inbox` in the marketplace command, and use its `bin/` as `--arg bin` when generating the Codex-only PATH setting.
+
+When upgrading, run the private npm install command again and update the plugin marketplace and plugin. To uninstall, remove the hook plugin, run `npm uninstall --prefix "${CODEX_HOME:-$HOME/.codex}/tools/agent-inbox" --no-save --package-lock=false agent-inbox`, and remove its private directory from the Codex PATH setting.
 
 For manual installation, merge [`hooks/hooks-codex.json`](hooks/hooks-codex.json) into `~/.codex/hooks.json`, replacing `${PLUGIN_ROOT}` with the absolute checkout directory and keeping the surrounding quotes. Keep the checkout intact. Install either the plugin or manual hooks once; Codex runs all matching hook sources.
 
@@ -87,7 +106,7 @@ else
 fi
 ```
 
-The command is exposed within agent shells, so ordinary terminals generally cannot find it. Posting still returns 1 when the command exists but its session queue has closed.
+Ordinary terminals cannot find the private sender. If invoked by absolute path outside an enabled session, or after its session queue has closed, `post` returns 1 without creating a queue.
 
 An explicit `AGENT_INBOX` selects a queue. Otherwise, `post` uses `OPENCODE_SESSION_ID` or `CODEX_SESSION_ID`. Working directories do not identify sessions, so two sessions in the same checkout remain separate and changing directories does not affect routing.
 
@@ -122,7 +141,7 @@ claude plugin validate .claude-plugin/marketplace.json
 AGENT_INBOX_NATIVE_TEST=1 npm test
 ```
 
-The native tests install the Codex plugin into an isolated home, load the Claude Code and OpenCode plugins, and invoke the bare `agent-inbox` command from a child shell with stdout and stderr discarded. They inspect subsequent model requests without adding the sender to the test environment's `PATH`. Codex runs with `workspace-write`, and a separate attempted write outside the workspace must remain denied after the PATH hook runs. Codex and OpenCode requests must retain their previous message prefix exactly; Claude Code must retain the delivered text across its transport's cache-marker changes.
+The native tests install the Codex plugin and private sender into an isolated Codex home and configure its shell environment policy. An ordinary shell with the same launch environment must not find the sender, while Codex must deliver mail using it. Claude Code and OpenCode use their bundled sender. All three invoke the bare command from a child shell with stdout and stderr discarded. Codex must display the original commands without PATH prefixes, and a separate attempted write outside its `workspace-write` sandbox must remain denied. Codex and OpenCode requests must retain their previous message prefix exactly; Claude Code must retain the delivered text across its transport's cache-marker changes.
 
 ## License
 

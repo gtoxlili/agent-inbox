@@ -1,9 +1,13 @@
 {
   "name": "agent-inbox",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "exports": "./index.js",
+  "bin": {
+    "agent-inbox": "./bin/agent-inbox"
+  },
+  "files": ["bin/", "hooks/", "index.js", ".claude-plugin/", ".codex-plugin/"],
   "scripts": {
     "test": "zsh test/test.zsh && node --test test/*.test.mjs"
   }
