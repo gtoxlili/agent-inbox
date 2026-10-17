@@ -3,6 +3,8 @@
 [![test](https://github.com/gtoxlili/agent-inbox/actions/workflows/test.yml/badge.svg)](https://github.com/gtoxlili/agent-inbox/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+English | [简体中文](README.zh-CN.md)
+
 A per-session inbox for Claude Code, Codex and OpenCode v2. Programs running in an agent's shell can post messages that reach the agent at the next tool or prompt boundary, independently of stdout and stderr.
 
 ```sh
@@ -14,9 +16,9 @@ Messages still arrive when the command redirects its output, captures it with `$
 
 ## Installation
 
-Requires **zsh and jq**, on macOS or Linux. Claude Code and OpenCode expose the bundled sender within agent shells. Codex uses npm to install a private sender and a Codex-only shell environment setting, as described below. No global executable, runtime npm dependencies or background service are required.
+Requires zsh and jq, on macOS or Linux. Claude Code and OpenCode expose the bundled sender within agent shells. Codex uses npm to install a private sender and a Codex-only shell environment setting, as described below. No global executable, runtime npm dependencies or background service are required.
 
-Tested with Claude Code **2.1.296**, Codex **0.162.1** and OpenCode **2.0.28**. The Codex adapter requires `CODEX_SESSION_ID` in shell children; OpenCode requires its v2 plugin API and `OPENCODE_SESSION_ID`.
+Tested with Claude Code 2.1.296, Codex 0.162.1 and OpenCode 2.0.28. The Codex adapter requires `CODEX_SESSION_ID` in shell children; OpenCode requires its v2 plugin API and `OPENCODE_SESSION_ID`.
 
 ### Claude Code
 
@@ -54,7 +56,7 @@ jq -nr --arg bin "$agent_inbox_prefix/node_modules/.bin" --arg current "$PATH" \
   '"[shell_environment_policy.set]\nPATH = \(($bin + ":" + $current) | tojson)"'
 ```
 
-Merge the printed table into `${CODEX_HOME:-$HOME/.codex}/config.toml`, preserving any existing keys in that table. The PATH value is literal: Codex does not expand `~` or `$PATH` inside it. The command above records the private directory plus your current PATH as a complete absolute value. Regenerate it if you change that environment.
+Merge the printed table into `${CODEX_HOME:-$HOME/.codex}/config.toml`, preserving any existing keys in that table. The PATH value is literal. Codex does not expand `~` or `$PATH` inside it. The command above records the private directory plus your current PATH as a complete absolute value. Regenerate it if you change that environment.
 
 Codex passes this setting as an environment variable to its shell children, keeping command text unchanged. Do not add the private directory to your shell profile or global PATH. Ordinary terminals cannot find the sender.
 
@@ -112,7 +114,7 @@ An explicit `AGENT_INBOX` selects a queue. Otherwise, `post` uses `OPENCODE_SESS
 
 ## Delivery and lifecycle
 
-All adapters use the same file queue in [`bin/agent-inbox`](bin/agent-inbox). Each message is published by atomically renaming a private temporary file. Queue directories and message files are private to the current user.
+All adapters use the same file queue in [`bin/agent-inbox`](bin/agent-inbox). The sender writes each message to a private temporary file, then renames it into the queue atomically. Queue directories and message files are private to the current user.
 
 | Client | Session identity | Delivery boundary | Cleanup |
 |---|---|---|---|
